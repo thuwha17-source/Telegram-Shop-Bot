@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
 
-# Thông tin chuyển khoản MBBank
+# Thông tin MBBank
 BANK_ID = "mbbank"
 ACCOUNT_NO = "0929388991"
 ACCOUNT_NAME = "NGUYEN HA ANH THU"
@@ -53,10 +53,10 @@ class DepositState(StatesGroup):
 
 
 class DeliverState(StatesGroup):
-  waiting_product_data = State()
+  waiting_phone = State()
+  waiting_otp = State()
 
 
-# 2 sản phẩm Shopee hiển thị mua trực tiếp trên Bot
 PRODUCTS = {
     "zin": {"name": "Zin • 4.5", "price": 4500},
     "da": {"name": "Đá • 3.5", "price": 3500},
@@ -257,7 +257,7 @@ async def approve_topup(callback: CallbackQuery):
   await callback.answer("Đã duyệt thành công!")
 
 
-# --- MUA HÀNG & GIAO THỦ CÔNG QUA NHÓM ADMIN ---
+# --- MUA HÀNG ---
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_buy(callback: CallbackQuery):
   product_key = callback.data.split("_", 1)[1]
@@ -295,23 +295,25 @@ async def handle_buy(callback: CallbackQuery):
     await callback.answer()
     return
 
-  # Trừ tiền ví
+  # Trừ tiền ví và ghi nhận đơn
   db["users"][user_id] = current_bal - price
   order_id = f"DH{int(asyncio.get_event_loop().time() * 10) % 1000000}"
   db["orders"][order_id] = {
       "user_id": user_id,
       "product_name": product["name"],
       "price": price,
+      "phone": "",
   }
   save_data(db)
 
   user = callback.from_user
   username = f"@{user.username}" if user.username else f"ID: {user.id}"
 
-  deliver_kb = InlineKeyboardMarkup(
+  # Nút bấm Bước 1: Giao số
+  step1_kb = InlineKeyboardMarkup(
       inline_keyboard=[[
           InlineKeyboardButton(
-              text="📤 Giao hàng cho khách", callback_data=f"sendorder_{order_id}"
+              text="📱 Gửi Số Điện Thoại", callback_data=f"sendphone_{order_id}"
           )
       ]]
   )
@@ -323,13 +325,13 @@ async def handle_buy(callback: CallbackQuery):
         f"• Mặt hàng: **{product['name']}**\n"
         f"• Đã trừ ví: -{price:,} VNĐ\n"
         f"• Số dư ví khách: `{db['users'][user_id]:,} VNĐ`\n\n"
-        f"👉 Lấy số từ kho ngoài rồi bấm nút bên dưới để gửi thẳng cho khách:"
+        f"👉 Bấm nút bên dưới để gửi số điện thoại cho khách:"
     )
     try:
       await bot.send_message(
           chat_id=ADMIN_GROUP_ID,
           text=admin_msg,
-          reply_markup=deliver_kb,
+          reply_markup=step1_kb,
           parse_mode="Markdown",
       )
     except Exception as e:
@@ -341,17 +343,108 @@ async def handle_buy(callback: CallbackQuery):
       f"• Sản phẩm: **{product['name']}**\n"
       f"• Trừ ví: -{price:,} VNĐ\n"
       f"• Số dư còn lại: `{db['users'][user_id]:,} VNĐ`\n\n"
-      f"⏳ Đơn hàng đang được chuẩn bị và sẽ gửi ngay vào tin nhắn này cho bạn (1-3 phút).",
+      f"⏳ Admin đang lấy số điện thoại và sẽ gửi ngay vào tin nhắn này (1-3 phút).",
       parse_mode="Markdown",
   )
   await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("sendorder_"))
-async def prompt_deliver(callback: CallbackQuery, state: FSMContext):
+# --- BƯỚC 1: ADMIN GỬI SỐ ĐIỆN THOẠI ---
+@dp.callback_query(F.data.startswith("sendphone_"))
+async def prompt_phone(callback: CallbackQuery, state: FSMContext):
   order_id = callback.data.split("_", 1)[1]
   order = db["orders"].get(order_id)
+  if not order:
+    await callback.answer("Đơn hàng không tồn tại hoặc đã xong!")
+    return
 
+  await state.update_data(
+      delivering_order_id=order_id,
+      message_id=callback.message.message_id,
+      original_text=callback.message.text,
+  )
+  await state.set_state(DeliverState.waiting_phone)
+
+  await callback.message.reply(
+      f"✍️ **NHẬP SỐ ĐIỆN THOẠI CHO ĐƠN `#{order_id}`:**\n\n"
+      f"Dán số điện thoại vào đây, bot sẽ gửi ngay cho khách."
+  )
+  await callback.answer()
+
+
+@dp.message(DeliverState.waiting_phone)
+async def process_send_phone(message: Message, state: FSMContext):
+  data = await state.get_data()
+  order_id = data.get("delivering_order_id")
+  msg_id = data.get("message_id")
+
+  order = db["orders"].get(order_id)
+  if not order:
+    await message.reply("Đơn hàng không tồn tại!")
+    await state.clear()
+    return
+
+  phone_number = message.text.strip()
+  order["phone"] = phone_number
+  save_data(db)
+
+  target_user_id = int(order["user_id"])
+
+  # Gửi số cho khách
+  try:
+    await bot.send_message(
+        chat_id=target_user_id,
+        text=(
+            f"📱 **SỐ ĐIỆN THOẠI CHO ĐƠN `#{order_id}`:**\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"`{phone_number}`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👉 Chạm vào số trên để sao chép.\n"
+            f"⚡ Khách vui lòng nhập số vào ứng dụng và bấm **Nhận mã OTP**. Bot"
+            f" sẽ tự động gửi mã ngay khi nhận được!"
+        ),
+        parse_mode="Markdown",
+    )
+  except Exception as e:
+    logging.error(f"Lỗi gửi số: {e}")
+
+  # Đổi nút trong nhóm Admin sang nút gửi OTP
+  step2_kb = InlineKeyboardMarkup(
+      inline_keyboard=[[
+          InlineKeyboardButton(
+              text="🔢 Gửi Mã OTP (Xác minh)",
+              callback_data=f"sendotp_{order_id}",
+          )
+      ]]
+  )
+
+  admin_name = message.from_user.username or message.from_user.first_name
+  try:
+    await bot.edit_message_text(
+        chat_id=message.chat.id,
+        message_id=msg_id,
+        text=(
+            f"🛍 **ĐƠN HÀNG Mã: `#{order_id}`**\n\n"
+            f"• Mặt hàng: {order['product_name']}\n"
+            f"• Số điện thoại đã gửi: `{phone_number}`\n"
+            f"• Người gửi số: @{admin_name}\n\n"
+            f"👉 Khi kho nhả mã OTP, bấm nút bên dưới để gửi tiếp cho khách:"
+        ),
+        reply_markup=step2_kb,
+        parse_mode="Markdown",
+    )
+  except Exception:
+    pass
+
+  await message.reply(f"✅ Đã gửi số `{phone_number}` cho khách thành công!")
+  await state.clear()
+
+
+# --- BƯỚC 2: ADMIN GỬI MÃ OTP ---
+@dp.callback_query(F.data.startswith("sendotp_"))
+async def prompt_otp(callback: CallbackQuery, state: FSMContext):
+  order_id = callback.data.split("_", 1)[1]
+  order = db["orders"].get(order_id)
   if not order:
     await callback.answer("Đơn hàng không tồn tại hoặc đã xử lý xong!")
     return
@@ -361,17 +454,17 @@ async def prompt_deliver(callback: CallbackQuery, state: FSMContext):
       message_id=callback.message.message_id,
       original_text=callback.message.text,
   )
-  await state.set_state(DeliverState.waiting_product_data)
+  await state.set_state(DeliverState.waiting_otp)
 
   await callback.message.reply(
-      f"✍️ **NHẬP SỐ / ACC CHO ĐƠN `#{order_id}`:**\n\n"
-      f"Dán số điện thoại hoặc thông tin tài khoản ngay vào nhóm này, bot sẽ tự động gửi thẳng cho khách."
+      f"✍️ **NHẬP MÃ OTP CHO ĐƠN `#{order_id}`:**\n\n"
+      f"Dán mã OTP vào đây, bot sẽ gửi ngay cho khách."
   )
   await callback.answer()
 
 
-@dp.message(DeliverState.waiting_product_data)
-async def deliver_product_to_user(message: Message, state: FSMContext):
+@dp.message(DeliverState.waiting_otp)
+async def process_send_otp(message: Message, state: FSMContext):
   data = await state.get_data()
   order_id = data.get("delivering_order_id")
   original_text = data.get("original_text")
@@ -379,56 +472,51 @@ async def deliver_product_to_user(message: Message, state: FSMContext):
 
   order = db["orders"].get(order_id)
   if not order:
-    await message.reply("Đơn hàng không tìm thấy!")
+    await message.reply("Đơn hàng không tồn tại!")
     await state.clear()
     return
 
-  product_info = message.text.strip()
+  otp_code = message.text.strip()
   target_user_id = int(order["user_id"])
 
-  # Gửi hàng trực tiếp vào tin nhắn cho khách
+  # Gửi OTP cho khách
   try:
     await bot.send_message(
         chat_id=target_user_id,
         text=(
-            f"🎉 **ĐƠN HÀNG CỦA BẠN ĐÃ ĐƯỢC GIAO!**\n\n"
-            f"• Mã đơn: `#{order_id}`\n"
-            f"• Sản phẩm: **{order['product_name']}**\n\n"
-            f"📦 **THÔNG TIN SẢN PHẨM:**\n"
+            f"🔢 **MÃ OTP XÁC MINH CHO ĐƠN `#{order_id}`:**\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"`{product_info}`\n"
+            f"`{otp_code}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"👉 Chạm vào dòng trên để sao chép."
+            f"👉 Chạm vào mã trên để sao chép.\n"
+            f"🎉 Giao dịch hoàn tất! Cảm ơn bạn đã ủng hộ shop."
         ),
         parse_mode="Markdown",
     )
-    delivery_success = True
   except Exception as e:
-    logging.error(f"Lỗi gửi hàng cho khách: {e}")
-    delivery_success = False
+    logging.error(f"Lỗi gửi OTP: {e}")
 
-  if delivery_success:
-    await message.reply(f"✅ Đã giao thành công cho đơn `#{order_id}`!")
-    try:
-      admin_name = message.from_user.username or message.from_user.first_name
-      await bot.edit_message_text(
-          chat_id=message.chat.id,
-          message_id=msg_id,
-          text=f"{original_text}\n\n🟢 **ĐÃ GIAO BỞI:** @{admin_name}\n📦 **Đã gửi:** `{product_info}`",
-      )
-    except Exception:
-      pass
-    db["orders"].pop(order_id, None)
-    save_data(db)
-  else:
-    await message.reply(
-        "❌ Không thể gửi tin nhắn cho khách (có thể khách đã chặn bot)."
+  admin_name = message.from_user.username or message.from_user.first_name
+  try:
+    await bot.edit_message_text(
+        chat_id=message.chat.id,
+        message_id=msg_id,
+        text=(
+            f"{original_text}\n\n🟢 **HOÀN TẤT ĐƠN HÀNG!**\n• OTP đã gửi:"
+            f" `{otp_code}`\n• Người duyệt OTP: @{admin_name}"
+        ),
+        parse_mode="Markdown",
     )
+  except Exception:
+    pass
 
+  await message.reply(f"✅ Đã gửi OTP `{otp_code}` và hoàn tất đơn hàng!")
+  db["orders"].pop(order_id, None)
+  save_data(db)
   await state.clear()
 
 
-# Web server nền đáp ứng kiểm tra của Render Web Service
+# Web server nền đáp ứng kiểm tra Render
 async def handle_ping(request):
   return web.Response(text="Bot is running!")
 
