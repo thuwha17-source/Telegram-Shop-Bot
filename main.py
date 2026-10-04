@@ -16,7 +16,6 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
 
-# Thông tin tài khoản ngân hàng nhận tiền
 BANK_ID = "mbbank"
 ACCOUNT_NO = "0929388991"
 ACCOUNT_NAME = "NGUYEN HA ANH THU"
@@ -322,4 +321,3 @@ async def main():
 
 if __name__ == "__main__":
   asyncio.run(main())
-
