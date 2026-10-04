@@ -8,10 +8,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiohttp import web
 
+# Lấy biến môi trường từ Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
 
+# Cấu hình tài khoản ngân hàng nhận tiền
 BANK_ID = "vietcombank"
 ACCOUNT_NO = "0123456789"
 ACCOUNT_NAME = "NGUYEN VAN A"
@@ -19,6 +22,7 @@ ACCOUNT_NAME = "NGUYEN VAN A"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Danh mục sản phẩm
 PRODUCTS = {
     "sp1": {"name": "Gói Cơ Bản", "price": 50000},
     "sp2": {"name": "Gói Nâng Cao", "price": 100000},
@@ -109,8 +113,24 @@ async def handle_confirm(callback: CallbackQuery):
   await callback.answer()
 
 
+# Khởi tạo web server giả lập cổng cho Render Free Web Service
+async def handle_health(request):
+  return web.Response(text="Bot is running!")
+
+
+async def start_web_server():
+  app = web.Application()
+  app.router.add_get("/", handle_health)
+  port = int(os.getenv("PORT", 8080))
+  runner = web.AppRunner(app)
+  await runner.setup()
+  site = web.TCPSite(runner, "0.0.0.0", port)
+  await site.start()
+
+
 async def main():
   print("Bot đang hoạt động...")
+  await start_web_server()
   await dp.start_polling(bot)
 
 
